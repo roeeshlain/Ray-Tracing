@@ -34,13 +34,13 @@ def parse_scene_file(file_path):
                 material = Material(params[:3], params[3:6], params[6:9], params[9], params[10])
                 objects.append(material)
             elif obj_type == "sph":
-                sphere = Sphere(params[:3], params[3], int(params[4]))
+                sphere = Sphere(params[:3], params[3], int(params[4]) - 1)
                 objects.append(sphere)
             elif obj_type == "pln":
-                plane = InfinitePlane(params[:3], params[3], int(params[4]))
+                plane = InfinitePlane(params[:3], params[3], int(params[4]) - 1)
                 objects.append(plane)
             elif obj_type == "box":
-                cube = Cube(params[:3], params[3], int(params[4]))
+                cube = Cube(params[:3], params[3], int(params[4]) - 1)
                 objects.append(cube)
             elif obj_type == "lgt":
                 light = Light(params[:3], params[3:6], params[6], params[7], params[8])
@@ -51,103 +51,131 @@ def parse_scene_file(file_path):
 
 
 def construct_camera_basis(camera):
-    """Build an orthonormal basis (right, up, forward) from camera vectors."""
+    """Build orthonormal basis for camera."""
     forward = normalize(np.array(camera.look_at) - np.array(camera.position))
-    right = normalize(np.cross(forward, np.array(camera.up_vector)))
-    up = normalize(np.cross(right, forward))
+    right = normalize(np.cross(forward, camera.up_vector))
+    up = np.cross(right, forward)  # Already normalized
     return right, up, forward
 
 
-def get_ray_through_pixel(camera, x, y, image_width, image_height):
-    right, up, forward = construct_camera_basis(camera)
-    aspect_ratio = image_width / image_height
-    screen_height = camera.screen_width / aspect_ratio
+def compute_ndc(x, y, width, height):
+    """Convert pixel coords to normalized device coords [-1, 1]."""
+    ndc_x = -((x + 0.5) / width - 0.5) * 2.0
+    ndc_y = -(((y + 0.5) / height - 0.5) * 2.0)
+    return ndc_x, ndc_y
 
-    ndc_x = -((x + 0.5) / image_width - 0.5) * 2.0
-    ndc_y = -(((y + 0.5) / image_height - 0.5) * 2.0)
 
-    screen_center = np.array(camera.position) + forward * camera.screen_distance
-    point_on_screen = (
-        screen_center
-        + right * ndc_x * camera.screen_width / 2.0
-        + up * ndc_y * screen_height / 2.0
+def get_ray_through_pixel(camera, x, y, image_width, image_height, right, up, forward, cam_pos, screen_center, half_width, half_height):
+    """Generate ray through pixel using precomputed values."""
+    ndc_x, ndc_y = compute_ndc(x, y, image_width, image_height)
+    point_on_screen = screen_center + right * (ndc_x * half_width) + up * (ndc_y * half_height)
+    direction = normalize(point_on_screen - cam_pos)
+    return cam_pos, direction
+
+
+def compute_reflection(material, ray_dir, normal, hit_point, geometry, lights, materials, scene_settings, depth, bg_color):
+    """Calculate reflection contribution for shiny surfaces."""
+    reflect_color = material.reflection_color
+    if not reflect_color or max(reflect_color) < EPSILON:
+        return None, 0.0
+    
+    # Pool balls need strong, consistent reflections - no Fresnel falloff
+    strength = max(reflect_color)
+    reflected_dir = reflect(ray_dir, normal)
+    reflected_origin = hit_point + normal * EPSILON
+    
+    reflected_color = trace_ray(
+        reflected_origin,
+        reflected_dir,
+        geometry,
+        lights,
+        materials,
+        scene_settings,
+        depth - 1,
+        bg_color,
     )
-
-    direction = normalize(point_on_screen - np.array(camera.position))
-    origin = np.array(camera.position, dtype=float)
-    return origin, direction
+    
+    return reflected_color * np.array(reflect_color), strength
 
 
-def trace_ray(ray_origin, ray_direction, geometry, lights, materials, scene_settings, depth):
+def trace_ray(ray_origin, ray_direction, geometry, lights, materials, scene_settings, depth, bg_color):
+    """Trace single ray through scene."""
     if depth <= 0:
-        return np.array(scene_settings.background_color, dtype=float)
+        return bg_color
 
     hit = find_closest_intersection(ray_origin, ray_direction, geometry)
     if not hit:
-        return np.array(scene_settings.background_color, dtype=float)
+        return bg_color
 
     color = calculate_lighting(hit, ray_direction, geometry, lights, materials, scene_settings)
+    
+    # Handle material index out of range gracefully
+    mat_idx = hit["object"].material_index
+    if mat_idx >= len(materials):
+        mat_idx = len(materials) - 1
+    material = materials[mat_idx]
 
-    material = materials[hit["object"].material_index]
-    if material.reflection_color:
-        reflection_strength = float(max(material.reflection_color))
-    else:
-        reflection_strength = 0.0
-    reflection_strength = max(0.0, min(1.0, reflection_strength))
-
-    if reflection_strength > EPSILON and depth > 0:
-        reflected_dir = normalize(reflect(ray_direction, hit["normal"]))
-        reflected_origin = hit["point"] + hit["normal"] * EPSILON
-
-        # Schlick Fresnel: stronger at glancing angles
-        cos_i = max(0.0, -np.dot(ray_direction, hit["normal"]))
-        fresnel = reflection_strength + (1.0 - reflection_strength) * ((1.0 - cos_i) ** 5)
-
-        reflected_color = trace_ray(
-            reflected_origin,
-            reflected_dir,
-            geometry,
-            lights,
-            materials,
-            scene_settings,
-            depth - 1,
+    if depth > 0:
+        reflected, strength = compute_reflection(
+            material, ray_direction, hit["normal"], hit["point"],
+            geometry, lights, materials, scene_settings, depth, bg_color
         )
-
-        tint = np.array(material.reflection_color, dtype=float)
-        color = color * (1.0 - fresnel) + reflected_color * fresnel * tint
+        if reflected is not None:
+            # Simple blend: more reflection, less surface color
+            color = color * (1.0 - strength) + reflected * strength
 
     return np.clip(color, 0.0, 1.0)
 
 
-def render_scene(camera, scene_settings, objects, image_width, image_height):
+def setup_scene(objects):
+    """Split objects into materials, lights, and geometry."""
     materials = [o for o in objects if isinstance(o, Material)]
     lights = [o for o in objects if isinstance(o, Light)]
     geometry = [o for o in objects if not isinstance(o, (Material, Light))]
+    return materials, lights, geometry
 
-    image_array = np.zeros((image_height, image_width, 3), dtype=np.float64)
+
+def precompute_camera_data(camera, image_width, image_height):
+    """Precompute camera values used for every pixel."""
+    right, up, forward = construct_camera_basis(camera)
+    cam_pos = np.array(camera.position, dtype=float)
+    screen_center = cam_pos + forward * camera.screen_distance
+    
+    aspect_ratio = image_width / image_height
+    screen_height = camera.screen_width / aspect_ratio
+    half_width = camera.screen_width / 2.0
+    half_height = screen_height / 2.0
+    
+    return right, up, forward, cam_pos, screen_center, half_width, half_height
+
+
+def render_scene(camera, scene_settings, objects, image_width, image_height):
+    """Render the scene to an image array."""
+    materials, lights, geometry = setup_scene(objects)
+    image_array = np.zeros((image_height, image_width, 3), dtype=np.float32)
+    
+    # Precompute camera values once
+    right, up, forward, cam_pos, screen_center, half_width, half_height = precompute_camera_data(camera, image_width, image_height)
+    bg_color = np.array(scene_settings.background_color, dtype=float)
+    max_depth = int(scene_settings.max_recursions)
 
     print(f"Rendering {image_width}x{image_height}...")
     for y in range(image_height):
         if y % 50 == 0:
             print(f"Row {y}/{image_height}")
         for x in range(image_width):
-            origin, direction = get_ray_through_pixel(camera, x, y, image_width, image_height)
-            color = trace_ray(
-                origin,
-                direction,
-                geometry,
-                lights,
-                materials,
-                scene_settings,
-                int(scene_settings.max_recursions),
+            origin, direction = get_ray_through_pixel(
+                camera, x, y, image_width, image_height,
+                right, up, forward, cam_pos, screen_center, half_width, half_height
             )
+            color = trace_ray(origin, direction, geometry, lights, materials, scene_settings, max_depth, bg_color)
             image_array[y, x] = color * 255.0
 
     return image_array
 
 
 def save_image(image_array, output_path):
-    # Direct save without gamma - colors are already in linear space
+    """Save rendered image to file."""
     image = Image.fromarray(np.uint8(np.clip(image_array, 0, 255)))
     image.save(output_path)
 

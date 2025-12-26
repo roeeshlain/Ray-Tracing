@@ -4,98 +4,97 @@ from intersections import find_closest_intersection
 from utils import EPSILON, clamp_color, normalize, reflect
 
 
-def _sample_point_in_sphere(radius, rng):
-    """Sample a random point inside a sphere of given radius."""
-    # Use Marsaglia method: random direction * random radius^(1/3)
-    while True:
-        v = rng.normal(size=3)
-        norm = np.linalg.norm(v)
-        if norm > 0:
-            dir_unit = v / norm
-            break
-    r = radius * (rng.random() ** (1.0 / 3.0))
-    return dir_unit * r
-
-
-def _shadow_visibility(point, light, geometry, samples):
-    """Return fraction of unoccluded shadow rays (soft shadows)."""
-    if samples <= 1 or light.radius <= EPSILON:
-        direction = normalize(np.array(light.position) - point)
-        distance_to_light = np.linalg.norm(np.array(light.position) - point)
-        shadow_origin = point + direction * EPSILON
-        hit = find_closest_intersection(shadow_origin, direction, geometry)
-        return 0.0 if (hit and hit["distance"] < distance_to_light) else 1.0
-
-    # Stratified sampling across a disk approximation of the light sphere for lower noise
-    rng = np.random.default_rng()
-    side = int(np.sqrt(samples))
-    if side < 1:
-        side = 1
+def compute_shadow(point, light, geometry):
+    """Calculate soft shadow with stratified sampling for smooth penumbra."""
+    light_pos = np.array(light.position, dtype=float)
+    to_light = light_pos - point
+    distance = np.linalg.norm(to_light)
+    direction = to_light / distance
+    
+    # If light has no radius, do hard shadow only
+    if light.radius < EPSILON:
+        origin = point + direction * EPSILON
+        hit = find_closest_intersection(origin, direction, geometry)
+        if hit and hit["distance"] < distance - EPSILON:
+            return 0.0
+        return 1.0
+    
+    # Stratified sampling in a disk for smooth shadows
     visible = 0
-    total = side * side
-    base_pos = np.array(light.position)
-    for i in range(side):
-        for j in range(side):
-            # jitter within each cell
-            u = (i + rng.random()) / side
-            v = (j + rng.random()) / side
-            # map square to disk, then to sphere surface (simple disk for speed)
-            r = light.radius * np.sqrt(u)
-            theta = 2 * np.pi * v
-            offset = np.array([r * np.cos(theta), r * np.sin(theta), 0.0])
-            # random rotation around up-axis for more variation
-            rot_theta = rng.uniform(0, 2 * np.pi)
-            rot = np.array([
-                [np.cos(rot_theta), 0, -np.sin(rot_theta)],
-                [0, 1, 0],
-                [np.sin(rot_theta), 0, np.cos(rot_theta)],
-            ])
-            jitter = rot @ offset
-            target = base_pos + jitter
-            direction = normalize(target - point)
-            distance_to_light = np.linalg.norm(target - point)
-            shadow_origin = point + direction * EPSILON
-            hit = find_closest_intersection(shadow_origin, direction, geometry)
-            if not hit or hit["distance"] >= distance_to_light:
-                visible += 1
+    total = 16  # 16 samples for smooth gradients
+    
+    # Create orthonormal basis for light
+    up = np.array([0, 1, 0]) if abs(direction[1]) < 0.9 else np.array([1, 0, 0])
+    right = normalize(np.cross(direction, up))
+    up = normalize(np.cross(right, direction))
+    
+    for i in range(total):
+        # Stratified disk sampling
+        angle = (i / total) * 2.0 * np.pi
+        radius = light.radius * np.sqrt((i + 0.5) / total)  # Uniform area distribution
+        
+        offset = radius * (right * np.cos(angle) + up * np.sin(angle))
+        sample_pos = light_pos + offset
+        
+        to_sample = sample_pos - point
+        sample_dist = np.linalg.norm(to_sample)
+        sample_dir = to_sample / sample_dist
+        
+        shadow_origin = point + sample_dir * EPSILON
+        hit = find_closest_intersection(shadow_origin, sample_dir, geometry)
+        if not hit or hit["distance"] >= sample_dist - EPSILON:
+            visible += 1
+    
     return visible / total
 
 
 def calculate_lighting(intersection, ray_direction, geometry, lights, materials, scene_settings):
+    """Calculate Phong lighting at intersection point."""
     point = intersection["point"]
     normal = intersection["normal"]
-    obj = intersection["object"]
-    material = materials[obj.material_index]
-
-    # Minimal ambient - let lights do the work
-    color = np.array([0.0, 0.0, 0.0])
-
+    
+    # Handle material index out of range gracefully
+    mat_idx = intersection["object"].material_index
+    if mat_idx >= len(materials):
+        mat_idx = len(materials) - 1
+    material = materials[mat_idx]
+    
+    # Small ambient component
+    diff_color = np.array(material.diffuse_color, dtype=float)
+    spec_color = np.array(material.specular_color, dtype=float)
+    color = diff_color * 0.1  # Ambient light
+    
     view_dir = normalize(-ray_direction)
-    # Use squared sample count with a reasonable floor/ceiling for smooth penumbra
-    base_samples = int(scene_settings.root_number_shadow_rays)
-    shadow_samples = max(25, base_samples * base_samples)
-    shadow_samples = min(shadow_samples, 49)
-
+    
     for light in lights:
-        light_dir = normalize(np.array(light.position) - point)
-        ndotl = max(np.dot(normal, light_dir), 0.0)
-        if ndotl <= 0:
+        light_pos = np.array(light.position, dtype=float)
+        light_color = np.array(light.color, dtype=float)
+        
+        # Diffuse
+        to_light = light_pos - point
+        light_dir = normalize(to_light)
+        ndotl = max(0.0, np.dot(normal, light_dir))
+        
+        if ndotl < EPSILON:
             continue
-
-        visibility = _shadow_visibility(point, light, geometry, shadow_samples)
-        # Apply shadow intensity: visibility 0 = full shadow, visibility 1 = full light
+        
+        # Soft shadow calculation
+        visibility = compute_shadow(point, light, geometry)
         shadow_factor = 1.0 - (1.0 - visibility) * light.shadow_intensity
-        if shadow_factor <= EPSILON:
+        
+        if shadow_factor < EPSILON:
             continue
-
-        diffuse = ndotl * shadow_factor * np.array(material.diffuse_color) * np.array(light.color)
-
-        reflect_dir = normalize(reflect(-light_dir, normal))
-        spec_angle = max(np.dot(reflect_dir, view_dir), 0.0)
-        specular = (spec_angle ** material.shininess) * shadow_factor
-        specular *= light.specular_intensity
-        specular_color = specular * np.array(material.specular_color) * np.array(light.color)
-
-        color += diffuse + specular_color
-
-    return clamp_color(color)
+        
+        # Add diffuse
+        diffuse = ndotl * diff_color * light_color * shadow_factor
+        color += diffuse
+        
+        # Specular (Phong)
+        reflect_dir = reflect(-light_dir, normal)
+        spec_dot = max(0.0, np.dot(reflect_dir, view_dir))
+        if spec_dot > 0:
+            specular = (spec_dot ** material.shininess) * spec_color * light_color
+            specular *= light.specular_intensity * shadow_factor
+            color += specular
+    
+    return np.clip(color, 0.0, 1.0)
