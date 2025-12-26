@@ -20,8 +20,9 @@ def compute_shadow(point, light, geometry):
         return 1.0
     
     # Stratified sampling in a disk for smooth shadows
+    # Increase samples for softer shadows while keeping cost reasonable
     visible = 0
-    total = 16  # 16 samples for smooth gradients
+    total = 12  # smoother penumbra with moderate cost
     
     # Create orthonormal basis for light
     up = np.array([0, 1, 0]) if abs(direction[1]) < 0.9 else np.array([1, 0, 0])
@@ -59,10 +60,10 @@ def calculate_lighting(intersection, ray_direction, geometry, lights, materials,
         mat_idx = len(materials) - 1
     material = materials[mat_idx]
     
-    # Small ambient component
+    # Ambient component
     diff_color = np.array(material.diffuse_color, dtype=float)
     spec_color = np.array(material.specular_color, dtype=float)
-    color = diff_color * 0.1  # Ambient light
+    color = diff_color * 0.2  # Ambient light
     
     view_dir = normalize(-ray_direction)
     

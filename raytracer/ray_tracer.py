@@ -75,15 +75,15 @@ def get_ray_through_pixel(camera, x, y, image_width, image_height, right, up, fo
 
 def compute_reflection(material, ray_dir, normal, hit_point, geometry, lights, materials, scene_settings, depth, bg_color):
     """Calculate reflection contribution for shiny surfaces."""
-    reflect_color = material.reflection_color
-    if not reflect_color or max(reflect_color) < EPSILON:
-        return None, 0.0
-    
-    # Pool balls need strong, consistent reflections - no Fresnel falloff
-    strength = max(reflect_color)
+    reflect_color = np.array(material.reflection_color, dtype=float)
+    strength = float(np.max(reflect_color)) if reflect_color.size else 0.0
+    if strength < EPSILON:
+        return None, 0.0, reflect_color
+
+    # No Fresnel falloff – use constant reflection strength
     reflected_dir = reflect(ray_dir, normal)
     reflected_origin = hit_point + normal * EPSILON
-    
+
     reflected_color = trace_ray(
         reflected_origin,
         reflected_dir,
@@ -94,8 +94,9 @@ def compute_reflection(material, ray_dir, normal, hit_point, geometry, lights, m
         depth - 1,
         bg_color,
     )
-    
-    return reflected_color * np.array(reflect_color), strength
+
+    # Return raw reflection (not premultiplied) plus vector color
+    return reflected_color, strength, reflect_color
 
 
 def trace_ray(ray_origin, ray_direction, geometry, lights, materials, scene_settings, depth, bg_color):
@@ -116,13 +117,50 @@ def trace_ray(ray_origin, ray_direction, geometry, lights, materials, scene_sett
     material = materials[mat_idx]
 
     if depth > 0:
-        reflected, strength = compute_reflection(
-            material, ray_direction, hit["normal"], hit["point"],
-            geometry, lights, materials, scene_settings, depth, bg_color
+        reflected_color = None
+        reflection_strength = 0.0
+        reflect_color_vec = np.zeros(3)
+        refracted_color = None
+
+        # Reflection (mirrors / shiny)
+        if max(material.reflection_color) > EPSILON:
+            reflected_color, reflection_strength, reflect_color_vec = compute_reflection(
+                material, ray_direction, hit["normal"], hit["point"],
+                geometry, lights, materials, scene_settings, depth, bg_color
+            )
+
+        # Transparency (glass) – march forward to avoid self-hit
+        if material.transparency > EPSILON:
+            refracted_origin = hit["point"] + ray_direction * EPSILON
+            refracted_color = trace_ray(
+                refracted_origin,
+                ray_direction,
+                geometry,
+                lights,
+                materials,
+                scene_settings,
+                depth - 1,
+                bg_color,
+            )
+
+        # Combine with energy conservation
+        local_weight = 1.0 - reflection_strength - material.transparency
+        local_weight = max(0.0, local_weight)
+
+        # Final blend using fresh local color (avoid double-scaling)
+        base_local = color
+        reflected_scaled = (reflected_color if reflected_color is not None else 0) * reflect_color_vec
+
+        color = (
+            base_local * local_weight
+            + reflected_scaled
+            + (refracted_color if refracted_color is not None else 0) * material.transparency
         )
-        if reflected is not None:
-            # Simple blend: more reflection, less surface color
-            color = color * (1.0 - strength) + reflected * strength
+
+        # Normalize weights if they exceed 1 (prevents darkening or blowout)
+        total_weight = local_weight + reflection_strength + material.transparency
+        if total_weight > 1.0 + EPSILON:
+            color /= total_weight
 
     return np.clip(color, 0.0, 1.0)
 
