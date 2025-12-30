@@ -100,7 +100,6 @@ def trace_ray(ray, intersectable, lights, materials, scene_settings, depth=0):
     hit_point_in = intersection - normal * EPSILON
 
     current_color = Vector(0, 0, 0)
-    total_specular = Vector(0, 0, 0)
     total_reflection = Vector(0, 0, 0)
 
     # Local Lighting (Shadows + Diffuse + Specular)
@@ -124,15 +123,33 @@ def trace_ray(ray, intersectable, lights, materials, scene_settings, depth=0):
             total_samples = scene_settings.root_number_shadow_rays ** 2
             unblocked_count = 0
             
-            # Use grid sampling as per original code structure
+            # 1. Coordinate System for the Area Light
+            # We need a plane perpendicular to the direction from Light to Hit Point.
+            # Vector from Light to Hit Point:
+            L_vec = (intersection - light.position).normalize()
+            
+            # Find an arbitrary vector distinct from L_vec to compute cross product
+            arbitrary_up = Vector(0, 1, 0)
+            if abs(L_vec.dot(arbitrary_up)) > 0.99: # If parallel to vertical, pick horizontal
+                 arbitrary_up = Vector(1, 0, 0)
+            
+            # Basis vectors for the light plane
+            light_u = L_vec.cross(arbitrary_up).normalize()
+            light_v = L_vec.cross(light_u).normalize()
+            
+            # Grid width is light.radius (as per user request: "wide as the defined light radius")
+            # Usually radius implies width=2*radius, but user said "as wide as radius".
+            # Assuming radius is the *extent* of the square, or the side length = radius.
+            cell_size = light.radius / scene_settings.root_number_shadow_rays
+
             for i in range(int(scene_settings.root_number_shadow_rays)):
                 for j in range(int(scene_settings.root_number_shadow_rays)):
-                    rand_x = (i + np.random.rand()) / scene_settings.root_number_shadow_rays
-                    rand_y = (j + np.random.rand()) / scene_settings.root_number_shadow_rays
+                    # Random jitter within the cell
+                    rand_u = (i + np.random.rand()) * cell_size - (light.radius / 2)
+                    rand_v = (j + np.random.rand()) * cell_size - (light.radius / 2)
                     
-                    # Construct point on light source centered at light.position
-                    # Assuming planar light logic from original code
-                    light_sample = light.position + Vector((rand_x - 0.5) * light.radius, (rand_y - 0.5) * light.radius, 0)
+                    # Calculate sample position on the light plane relative to light center
+                    light_sample = light.position + light_u * rand_u + light_v * rand_v
                     
                     sample_dir = (light_sample - intersection).normalize()
                     sample_dist = (light_sample - intersection).magnitude()
@@ -159,41 +176,30 @@ def trace_ray(ray, intersectable, lights, materials, scene_settings, depth=0):
                 specular_factor = max(0, view_dir.dot(reflect_vector)) ** material.shininess
                 specular_contribution = light.color * material.specular_color * specular_factor 
             
-            # Combine and scale by shadow
-            # Add ONLY diffuse to the base color that gets blended with transparency
-            current_color += diffuse_contribution * shadow_intensity
-            # Accumulate specular separately
-            total_specular += specular_contribution * shadow_intensity
+            # Combine Diffuse + Specular
+            current_color += (diffuse_contribution + specular_contribution) * shadow_intensity
+
 
     # Recursion: Reflection
-    # If using recursive weighting, usually we Add (Reflection * Reflectivity)
     if material.reflection_color.magnitude() > 0:
-        reflect_dir = (ray.direction.reflect(normal)) # reflect returns incident reflected?
-        # ray.dir is Incident (Eye -> Hit).
-        # reflect(N) returns: I - 2(I.N)N.
-        # This IS the correct reflection vector direction R.
-        # e.g. I=(1,-1), N=(0,1). I.N=-1. Res=(1,-1) - 2(-1)(0,1) = (1,-1) + (0,2) = (1,1). Correct.
-        
+        reflect_dir = (ray.direction.reflect(normal)) 
         reflected_ray = Ray(hit_point_out, reflect_dir)
         reflected_color = trace_ray(reflected_ray, intersectable, lights, materials, scene_settings, depth + 1)
         total_reflection = reflected_color * material.reflection_color
 
     # Recursion: Transparency
+    transparency_color = Vector(0,0,0)
     if material.transparency > 0:
-        # Straight-line transparency (no IOR yet)
         transparency_ray = Ray(hit_point_in, ray.direction) 
         transparency_color = trace_ray(transparency_ray, intersectable, lights, materials, scene_settings, depth + 1)
-        
-        # Mix with current color (Standard Over operator approximation)
-        # assuming transparency is alpha. 
-        # result = (1-alpha)*current + alpha*transparency_color ?
-        # Or if transparency is just "how much passes through", and the object itself has diffuse color...
-        # Usually: Diffuse is the surface color. Transparency adds light from behind.
-        # current_color (Surface) * (1-trans) + Background * trans
-        
-        current_color = current_color * (1 - material.transparency) + transparency_color * material.transparency
 
-    return current_color + total_specular + total_reflection
+    # 2. Final Color Mixing Formula
+    # IN THE INSTRUCTIONS PDF: Output = (Background * Trans) + (Diffuse + Specular) * (1 - Trans) + Reflection
+    # 'current_color' currently contains (Diffuse + Specular) from all lights
+    
+    return (transparency_color * material.transparency) + \
+           (current_color * (1 - material.transparency)) + \
+           total_reflection
 
 
 def main():
