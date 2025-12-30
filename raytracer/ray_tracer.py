@@ -1,7 +1,6 @@
 import argparse
 from PIL import Image
 import numpy as np
-
 from camera import Camera
 from light import Light
 from material import Material
@@ -9,6 +8,14 @@ from scene_settings import SceneSettings
 from surfaces.cube import Cube
 from surfaces.infinite_plane import InfinitePlane
 from surfaces.sphere import Sphere
+from vector import Vector
+from ray import Ray
+from scene_settings import SceneSettings
+from light import Light
+
+
+
+EPSILON = 1e-6
 
 
 def parse_scene_file(file_path):
@@ -47,14 +54,150 @@ def parse_scene_file(file_path):
     return camera, scene_settings, objects
 
 
-def save_image(image_array):
-    image = Image.fromarray(np.uint8(image_array))
+def save_image(image_array, output_image):
+    image = Image.fromarray(np.uint8(np.clip(image_array, 0, 255)))
 
     # Save the image to a file
-    image.save("scenes/Spheres.png")
+    image.save(output_image)
+
+def find_closest_intersection(ray, intersectable):
+    closest_intersection = None
+    closest_normal = None
+    closest_object = None
+    min_dist = float('inf')
+
+    for obj in intersectable:
+        result = obj.ray_interception(ray)
+        if result:
+            intersection, normal = result
+            dist = (intersection - ray.origin).magnitude()
+            if dist < min_dist:
+                min_dist = dist
+                closest_intersection = intersection
+                closest_normal = normal
+                closest_object = obj
+    
+    return closest_intersection, closest_object, closest_normal
+
+def trace_ray(ray, intersectable, lights, materials, scene_settings, depth=0):
+    if depth > scene_settings.max_recursions: 
+        return Vector(0, 0, 0)
+
+    intersection, hit_object, normal = find_closest_intersection(ray, intersectable)
+
+    if not hit_object:
+        return Vector(*scene_settings.background_color) # Background reflection
+
+    # Adjust normal for direction (if hitting from inside)
+    if ray.direction.dot(normal) > 0:
+        normal = -normal
+
+    # Material properties
+    material = materials[hit_object.material_index - 1]
+    
+    # Calculate offset points to avoid self-intersection (Acne)
+    hit_point_out = intersection + normal * EPSILON #this point is epsilon far in the direction of normal, to avoid self-intersection
+    hit_point_in = intersection - normal * EPSILON
+
+    current_color = Vector(0, 0, 0)
+    total_specular = Vector(0, 0, 0)
+    total_reflection = Vector(0, 0, 0)
+
+    # Local Lighting (Shadows + Diffuse + Specular)
+    for light in lights:
+        light_dir = (light.position - intersection).normalize()
+        light_distance = (light.position - intersection).magnitude()
+        
+        # Shadow Check
+        shadow_intensity = 0.0 # 0 = fully in shadow, 1 = fully lit
+        
+        if light.radius < EPSILON: # Hard Shadow
+            # Direction TO light
+            shadow_ray = Ray(hit_point_out, light_dir)
+            shadow_hit, shadowed_obj, _ = find_closest_intersection(shadow_ray, intersectable)
+            # Check if hit object is closer than light
+            if shadow_hit and (shadow_hit - hit_point_out).magnitude() < light_distance:
+                shadow_intensity = 0.0
+            else:
+                shadow_intensity = 1.0
+        else: # Soft Shadow
+            total_samples = scene_settings.root_number_shadow_rays ** 2
+            unblocked_count = 0
+            
+            # Use grid sampling as per original code structure
+            for i in range(int(scene_settings.root_number_shadow_rays)):
+                for j in range(int(scene_settings.root_number_shadow_rays)):
+                    rand_x = (i + np.random.rand()) / scene_settings.root_number_shadow_rays
+                    rand_y = (j + np.random.rand()) / scene_settings.root_number_shadow_rays
+                    
+                    # Construct point on light source centered at light.position
+                    # Assuming planar light logic from original code
+                    light_sample = light.position + Vector((rand_x - 0.5) * light.radius, (rand_y - 0.5) * light.radius, 0)
+                    
+                    sample_dir = (light_sample - intersection).normalize()
+                    sample_dist = (light_sample - intersection).magnitude()
+                    
+                    shadow_ray = Ray(hit_point_out, sample_dir)
+                    shadow_hit, shadowed_obj, _ = find_closest_intersection(shadow_ray, intersectable)
+                    
+                    if not shadow_hit or (shadow_hit - hit_point_out).magnitude() > sample_dist:
+                         unblocked_count += 1
+            
+            shadow_intensity = unblocked_count / total_samples
+
+        if shadow_intensity > 0:
+            # Diffuse
+            diffuse_factor = max(0, normal.dot(light_dir))
+            diffuse_contribution = material.diffuse_color * light.color * diffuse_factor
+            
+            # Specular
+            specular_contribution = Vector(0,0,0)
+            if material.shininess > 0:
+                reflect_vector = -(light_dir.reflect(normal))
+                view_dir = (ray.origin - intersection).normalize()
+                
+                specular_factor = max(0, view_dir.dot(reflect_vector)) ** material.shininess
+                specular_contribution = light.color * material.specular_color * specular_factor 
+            
+            # Combine and scale by shadow
+            # Add ONLY diffuse to the base color that gets blended with transparency
+            current_color += diffuse_contribution * shadow_intensity
+            # Accumulate specular separately
+            total_specular += specular_contribution * shadow_intensity
+
+    # Recursion: Reflection
+    # If using recursive weighting, usually we Add (Reflection * Reflectivity)
+    if material.reflection_color.magnitude() > 0:
+        reflect_dir = (ray.direction.reflect(normal)) # reflect returns incident reflected?
+        # ray.dir is Incident (Eye -> Hit).
+        # reflect(N) returns: I - 2(I.N)N.
+        # This IS the correct reflection vector direction R.
+        # e.g. I=(1,-1), N=(0,1). I.N=-1. Res=(1,-1) - 2(-1)(0,1) = (1,-1) + (0,2) = (1,1). Correct.
+        
+        reflected_ray = Ray(hit_point_out, reflect_dir)
+        reflected_color = trace_ray(reflected_ray, intersectable, lights, materials, scene_settings, depth + 1)
+        total_reflection = reflected_color * material.reflection_color
+
+    # Recursion: Transparency
+    if material.transparency > 0:
+        # Straight-line transparency (no IOR yet)
+        transparency_ray = Ray(hit_point_in, ray.direction) 
+        transparency_color = trace_ray(transparency_ray, intersectable, lights, materials, scene_settings, depth + 1)
+        
+        # Mix with current color (Standard Over operator approximation)
+        # assuming transparency is alpha. 
+        # result = (1-alpha)*current + alpha*transparency_color ?
+        # Or if transparency is just "how much passes through", and the object itself has diffuse color...
+        # Usually: Diffuse is the surface color. Transparency adds light from behind.
+        # current_color (Surface) * (1-trans) + Background * trans
+        
+        current_color = current_color * (1 - material.transparency) + transparency_color * material.transparency
+
+    return current_color + total_specular + total_reflection
 
 
 def main():
+
     parser = argparse.ArgumentParser(description='Python Ray Tracer')
     parser.add_argument('scene_file', type=str, help='Path to the scene file')
     parser.add_argument('output_image', type=str, help='Name of the output image file')
@@ -64,15 +207,35 @@ def main():
 
     # Parse the scene file
     camera, scene_settings, objects = parse_scene_file(args.scene_file)
+    #create intersectable list
+    intersectable = [obj for obj in objects if isinstance(obj, (Sphere, Cube, InfinitePlane))]
+    #create a lights list
+    lights = [obj for obj in objects if isinstance(obj, Light)]
+    #create materials list
+    materials = [obj for obj in objects if isinstance(obj, Material)]
 
-    # TODO: Implement the ray tracer
-
-    # Dummy result
-    image_array = np.zeros((500, 500, 3))
+    # Result array
+    image_array = np.zeros((args.height, args.width, 3), dtype=np.float32)
+    
+    # Pre-processing
+    forward_vector = (camera.look_at - camera.position).normalize()
+    right_vector = forward_vector.cross(camera.up_vector).normalize()
+    up_vector = right_vector.cross(forward_vector).normalize()
+    
+    # Main rendering loop
+    # Optimization idea: Vectorize this loop later if asked, but for now simple loop
+    for y in range(args.height):
+        for x in range(args.width):
+            # args.width - 1 - x Flips the Left/Right axis to fix mirroring
+            ray = camera.get_ray(args.width - 1 - x, args.height - 1 - y, args.width, args.height, forward_vector, right_vector, up_vector)
+            
+            final_color = trace_ray(ray, intersectable, lights, materials, scene_settings)
+            
+            # Store in image
+            image_array[y, x] = final_color.to_rgb()
 
     # Save the output image
-    save_image(image_array)
-
+    save_image(image_array, args.output_image)
 
 if __name__ == '__main__':
     main()
