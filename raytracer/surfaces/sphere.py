@@ -20,11 +20,15 @@ class Sphere:
         else:
             t1 = (-b - discriminant**0.5) / (2 * a)
             t2 = (-b + discriminant**0.5) / (2 * a)
-            t = min(t1, t2)
-            if t < 0:
-                return False  # Intersection is behind the ray origin
+            
+            # Logic to handle rays starting inside the sphere
+            if t1 > 0:
+                t = t1
+            elif t2 > 0:
+                t = t2
+            else:
+                return False # Both interactions are behind the ray
+
             intersection_point = ray.origin + ray.direction * t
             normal = (intersection_point - self.position).normalize()  # Calculate normal
             return intersection_point, normal  # Return normal
-
-
