@@ -79,9 +79,12 @@ def find_closest_intersection(ray, intersectable):
     
     return closest_intersection, closest_object, closest_normal
 
-def trace_ray(ray, intersectable, lights, materials, scene_settings, depth=0):
-    if depth > scene_settings.max_recursions: 
-        return Vector(0, 0, 0)
+def trace_ray(ray, intersectable, lights, materials, scene_settings, remaining_recursions=None):
+
+    if remaining_recursions is None:
+        remaining_recursions = int(scene_settings.max_recursions)
+    if remaining_recursions < 0:
+        return Vector(*scene_settings.background_color)
 
     intersection, hit_object, normal = find_closest_intersection(ray, intersectable)
 
@@ -107,62 +110,56 @@ def trace_ray(ray, intersectable, lights, materials, scene_settings, depth=0):
         light_dir = (light.position - intersection).normalize()
         light_distance = (light.position - intersection).magnitude()
         
-        # Shadow Check
-        shadow_intensity = 0.0 # 0 = fully in shadow, 1 = fully lit
-        
-        if light.radius < EPSILON: # Hard Shadow
-            # Direction TO light
+        # Shadow / visibility check
+        # PDF: if N==1 only one ray is cast (hard shadows). For N>1, cast N*N rays for soft shadows.
+        N = int(scene_settings.root_number_shadow_rays)
+        shadow_intensity = 0.0  # 0 = fully blocked, 1 = fully visible
+
+        if N <= 1 or light.radius < EPSILON:
+            # Hard shadow (single ray toward light center)
             shadow_ray = Ray(hit_point_out, light_dir)
-            shadow_hit, shadowed_obj, _ = find_closest_intersection(shadow_ray, intersectable)
-            # Check if hit object is closer than light
+            shadow_hit, _, _ = find_closest_intersection(shadow_ray, intersectable)
             if shadow_hit and (shadow_hit - hit_point_out).magnitude() < light_distance:
                 shadow_intensity = 0.0
             else:
                 shadow_intensity = 1.0
-        else: # Soft Shadow
-            total_samples = scene_settings.root_number_shadow_rays ** 2
+        else:
+            # Soft shadows: stratified N×N jittered sampling over an area light
+            total_samples = N * N
             unblocked_count = 0
-            
-            # 1. Coordinate System for the Area Light
-            # We need a plane perpendicular to the direction from Light to Hit Point.
-            # Vector from Light to Hit Point:
+
+            # Plane perpendicular to direction from light to hit point
             L_vec = (intersection - light.position).normalize()
-            
-            # Find an arbitrary vector distinct from L_vec to compute cross product
+
             arbitrary_up = Vector(0, 1, 0)
-            if abs(L_vec.dot(arbitrary_up)) > 0.99: # If parallel to vertical, pick horizontal
-                 arbitrary_up = Vector(1, 0, 0)
-            
-            # Basis vectors for the light plane
+            if abs(L_vec.dot(arbitrary_up)) > 0.99:
+                arbitrary_up = Vector(1, 0, 0)
+
             light_u = L_vec.cross(arbitrary_up).normalize()
             light_v = L_vec.cross(light_u).normalize()
-            
-            # Grid width is light.radius (as per user request: "wide as the defined light radius")
-            # Usually radius implies width=2*radius, but user said "as wide as radius".
-            # Assuming radius is the *extent* of the square, or the side length = radius.
-            cell_size = light.radius / scene_settings.root_number_shadow_rays
 
-            for i in range(int(scene_settings.root_number_shadow_rays)):
-                for j in range(int(scene_settings.root_number_shadow_rays)):
-                    # Random jitter within the cell
+            cell_size = light.radius / N
+            for i in range(N):
+                for j in range(N):
                     rand_u = (i + np.random.rand()) * cell_size - (light.radius / 2)
                     rand_v = (j + np.random.rand()) * cell_size - (light.radius / 2)
-                    
-                    # Calculate sample position on the light plane relative to light center
+
                     light_sample = light.position + light_u * rand_u + light_v * rand_v
-                    
                     sample_dir = (light_sample - intersection).normalize()
                     sample_dist = (light_sample - intersection).magnitude()
-                    
-                    shadow_ray = Ray(hit_point_out, sample_dir)
-                    shadow_hit, shadowed_obj, _ = find_closest_intersection(shadow_ray, intersectable)
-                    
-                    if not shadow_hit or (shadow_hit - hit_point_out).magnitude() > sample_dist:
-                         unblocked_count += 1
-            
-            shadow_intensity = unblocked_count / total_samples
 
-        if shadow_intensity > 0:
+                    shadow_ray = Ray(hit_point_out, sample_dir)
+                    shadow_hit, _, _ = find_closest_intersection(shadow_ray, intersectable)
+                    if not shadow_hit or (shadow_hit - hit_point_out).magnitude() > sample_dist:
+                        unblocked_count += 1
+
+            light_hit_ratio = unblocked_count / total_samples
+            shadow_intensity = (1-light_hit_ratio)+(light.shadow_intensity*light_hit_ratio)
+
+        # PDF: light intensity = (1 - shadowIntensity)*1 + shadowIntensity*(%visible)
+        light_intensity = (1.0 - light.shadow_intensity) + light.shadow_intensity * shadow_intensity
+
+        if light_intensity > 0:
             # Diffuse
             diffuse_factor = max(0, normal.dot(light_dir))
             diffuse_contribution = material.diffuse_color * light.color * diffuse_factor
@@ -174,32 +171,55 @@ def trace_ray(ray, intersectable, lights, materials, scene_settings, depth=0):
                 view_dir = (ray.origin - intersection).normalize()
                 
                 specular_factor = max(0, view_dir.dot(reflect_vector)) ** material.shininess
-                specular_contribution = light.color * material.specular_color * specular_factor 
+                specular_contribution = light.color * material.specular_color * specular_factor * light.specular_intensity 
             
             # Combine Diffuse + Specular
-            current_color += (diffuse_contribution + specular_contribution) * shadow_intensity
+            current_color += (diffuse_contribution + specular_contribution) * light_intensity
 
 
     # Recursion: Reflection
     if material.reflection_color.magnitude() > 0:
-        reflect_dir = (ray.direction.reflect(normal)) 
+        reflect_dir = (ray.direction.reflect(normal))
         reflected_ray = Ray(hit_point_out, reflect_dir)
-        reflected_color = trace_ray(reflected_ray, intersectable, lights, materials, scene_settings, depth + 1)
+        if remaining_recursions <= 0:
+            reflected_color = Vector(*scene_settings.background_color)
+        else:
+            reflected_color = trace_ray(
+                reflected_ray,
+                intersectable,
+                lights,
+                materials,
+                scene_settings,
+                remaining_recursions=remaining_recursions - 1,
+            )
         total_reflection = reflected_color * material.reflection_color
 
     # Recursion: Transparency
-    transparency_color = Vector(0,0,0)
+    transparency_color = Vector(0, 0, 0)
     if material.transparency > 0:
-        transparency_ray = Ray(hit_point_in, ray.direction) 
-        transparency_color = trace_ray(transparency_ray, intersectable, lights, materials, scene_settings, depth + 1)
+        transparency_ray = Ray(hit_point_in, ray.direction)
+        if remaining_recursions <= 0:
+            transparency_color = Vector(*scene_settings.background_color)
+        else:
+            transparency_color = trace_ray(
+                transparency_ray,
+                intersectable,
+                lights,
+                materials,
+                scene_settings,
+                remaining_recursions=remaining_recursions - 1,
+            )
 
     # 2. Final Color Mixing Formula
     # IN THE INSTRUCTIONS PDF: Output = (Background * Trans) + (Diffuse + Specular) * (1 - Trans) + Reflection
     # 'current_color' currently contains (Diffuse + Specular) from all lights
+    # Note: Reflection is added independently, not affected by transparency
     
-    return (transparency_color * material.transparency) + \
-           (current_color * (1 - material.transparency)) + \
-           total_reflection
+    final_color = (transparency_color * material.transparency) + \
+                  (current_color * (1 - material.transparency)) + \
+                  total_reflection
+    
+    return final_color
 
 
 def main():
@@ -235,7 +255,14 @@ def main():
             # args.width - 1 - x Flips the Left/Right axis to fix mirroring
             ray = camera.get_ray(args.width - 1 - x, args.height - 1 - y, args.width, args.height, forward_vector, right_vector, up_vector)
             
-            final_color = trace_ray(ray, intersectable, lights, materials, scene_settings)
+            final_color = trace_ray(
+                ray,
+                intersectable,
+                lights,
+                materials,
+                scene_settings,
+                remaining_recursions=int(scene_settings.max_recursions),
+            )
             
             # Store in image
             image_array[y, x] = final_color.to_rgb()
