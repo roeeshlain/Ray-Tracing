@@ -5,6 +5,13 @@ from surfaces.cube import Cube
 from surfaces.infinite_plane import InfinitePlane
 
 class Ray:
+    """
+    Ray class - represents a ray in 3D space. 
+
+    Attributes:
+        origin (Vector): The origin of the ray.
+        direction (Vector): The direction of the ray.
+    """
     __slots__ = ('origin', 'direction')
 
     def __init__(self, origin: Vector, direction: Vector):

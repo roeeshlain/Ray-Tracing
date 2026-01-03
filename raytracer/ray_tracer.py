@@ -15,10 +15,20 @@ from light import Light
 
 
 
-EPSILON = 1e-6
+EPSILON = 1e-6 #Small constant used for acne (self-intersection) prevention
 
 
 def parse_scene_file(file_path):
+    """
+    Parse a scene file, construct all the scene objects and return the camera, scene settings, and objects.
+    Remained unchanged from the original skeleton.
+
+    Args:
+        file_path (str): The path to the scene file.
+    
+    Returns:
+        tuple: A tuple containing the camera, scene settings, and objects.
+    """
     objects = []
     camera = None
     scene_settings = None
@@ -55,12 +65,32 @@ def parse_scene_file(file_path):
 
 
 def save_image(image_array, output_image):
+    """
+    Save the image to a file - recieves image array(np array) and output image path
+
+    Args:
+        image_array (np.array): The image array to save.
+        output_image (str): The path to save the image to.
+    """
     image = Image.fromarray(np.uint8(np.clip(image_array, 0, 255)))
 
     # Save the image to a file
     image.save(output_image)
 
 def find_closest_intersection(ray, intersectable):
+    """
+    Find the closest intersection point between a ray and a list of intersectable objects.
+
+    Iterates over all objects in the scene and checks for intersection with the ray.
+    Returns the closest intersection point, the normal at that point, and the object that was intersected.
+
+    Args:
+        ray (Ray): The ray to check for intersection.
+        intersectable (list): A list of objects that can be intersected by the ray
+
+    Returns:
+        tuple: A tuple containing the closest intersection point(Vector or None), the object that was intersected(Object or None), the normal at that point(Vector or None). 
+    """
     closest_intersection = None
     closest_normal = None
     closest_object = None
@@ -80,7 +110,21 @@ def find_closest_intersection(ray, intersectable):
     return closest_intersection, closest_object, closest_normal
 
 def trace_ray(ray, intersectable, lights, materials, scene_settings, remaining_recursions=None):
+    """
+    Trace a ray through the scene and return the color of the pixel at the intersection point.
+    Recursively traces the ray through the scene, following reflections, transparency and shadows.
 
+    Args:
+        ray (Ray): The ray to trace.
+        intersectable (list): A list of objects that can be intersected by the ray
+        lights (list): A list of light sources in the scene
+        materials (list): A list of materials in the scene
+        scene_settings (SceneSettings): The scene settings
+        remaining_recursions (int, optional): The number of remaining recursions. Defaults to None.
+
+    Returns:
+        Vector: The color of the pixel at the intersection point.
+    """
     if remaining_recursions is None:
         remaining_recursions = int(scene_settings.max_recursions)
     if remaining_recursions < 0:
@@ -89,9 +133,9 @@ def trace_ray(ray, intersectable, lights, materials, scene_settings, remaining_r
     intersection, hit_object, normal = find_closest_intersection(ray, intersectable)
 
     if not hit_object:
-        return Vector(*scene_settings.background_color) # Background reflection
+        return Vector(*scene_settings.background_color) # Background color is returned if no intersection
 
-    # Adjust normal for direction (if hitting from inside)
+    # Flip normal if ray is coming from inside the object(to enable tracing with transparent objects)
     if ray.direction.dot(normal) > 0:
         normal = -normal
 
@@ -99,21 +143,20 @@ def trace_ray(ray, intersectable, lights, materials, scene_settings, remaining_r
     material = materials[hit_object.material_index - 1]
     
     # Calculate offset points to avoid self-intersection (Acne)
-    hit_point_out = intersection + normal * EPSILON #this point is epsilon far in the direction of normal, to avoid self-intersection
+    hit_point_out = intersection + normal * EPSILON 
     hit_point_in = intersection - normal * EPSILON
 
-    current_color = Vector(0, 0, 0)
+    current_color = Vector(0, 0, 0) 
     total_reflection = Vector(0, 0, 0)
 
     # Local Lighting (Shadows + Diffuse + Specular)
     for light in lights:
-        light_dir = (light.position - intersection).normalize()
-        light_distance = (light.position - intersection).magnitude()
+        light_dir = (light.position - intersection).normalize() # Direction from intersection to light
+        light_distance = (light.position - intersection).magnitude() # Distance from intersection to light
         
         # Shadow / visibility check
-        # PDF: if N==1 only one ray is cast (hard shadows). For N>1, cast N*N rays for soft shadows.
         N = int(scene_settings.root_number_shadow_rays)
-        shadow_intensity = 0.0  # 0 = fully blocked, 1 = fully visible
+        shadow_intensity = 0.0  # 0.0 = fully blocked, 1.0 = fully visible
 
         if N <= 1 or light.radius < EPSILON:
             # Hard shadow (single ray toward light center)
@@ -124,24 +167,23 @@ def trace_ray(ray, intersectable, lights, materials, scene_settings, remaining_r
             else:
                 shadow_intensity = 1.0
         else:
-            # Soft shadows: stratified N×N jittered sampling over an area light
+            # Soft shadows:  N×N sampling over an area light
             total_samples = N * N
             unblocked_count = 0
+            L_vec = (intersection - light.position).normalize() # Plane perpendicular to direction from light to hit point
 
-            # Plane perpendicular to direction from light to hit point
-            L_vec = (intersection - light.position).normalize()
-
-            arbitrary_up = Vector(0, 1, 0)
-            if abs(L_vec.dot(arbitrary_up)) > 0.99:
+            arbitrary_up = Vector(0, 1, 0) # An arbitrary vector perpendicular to L_vec
+            if abs(L_vec.dot(arbitrary_up)) > 0.99: # If L_vec is parallel to arbitrary_up, choose a different arbitrary_up
                 arbitrary_up = Vector(1, 0, 0)
 
+            # Create a coordinate system for the light plane
             light_u = L_vec.cross(arbitrary_up).normalize()
             light_v = L_vec.cross(light_u).normalize()
 
             cell_size = light.radius / N
-            for i in range(N):
+            for i in range(N): # Choose random points in a grid of N x N cells inside the light radius
                 for j in range(N):
-                    rand_u = (i + np.random.rand()) * cell_size - (light.radius / 2)
+                    rand_u = (i + np.random.rand()) * cell_size - (light.radius / 2) 
                     rand_v = (j + np.random.rand()) * cell_size - (light.radius / 2)
 
                     light_sample = light.position + light_u * rand_u + light_v * rand_v
@@ -154,10 +196,8 @@ def trace_ray(ray, intersectable, lights, materials, scene_settings, remaining_r
                         unblocked_count += 1
 
             light_hit_ratio = unblocked_count / total_samples
-            shadow_intensity = (1-light_hit_ratio)+(light.shadow_intensity*light_hit_ratio)
 
-        # PDF: light intensity = (1 - shadowIntensity)*1 + shadowIntensity*(%visible)
-        light_intensity = (1.0 - light.shadow_intensity) + light.shadow_intensity * shadow_intensity
+        light_intensity = (1.0 - light.shadow_intensity) + light.shadow_intensity * light_hit_ratio
 
         if light_intensity > 0:
             # Diffuse
@@ -210,10 +250,10 @@ def trace_ray(ray, intersectable, lights, materials, scene_settings, remaining_r
                 remaining_recursions=remaining_recursions - 1,
             )
 
-    # 2. Final Color Mixing Formula
-    # IN THE INSTRUCTIONS PDF: Output = (Background * Trans) + (Diffuse + Specular) * (1 - Trans) + Reflection
+    # Final Color Mixing Formula
+    # Output = (Background * Trans) + (Diffuse + Specular) * (1 - Trans) + Reflection
     # 'current_color' currently contains (Diffuse + Specular) from all lights
-    # Note: Reflection is added independently, not affected by transparency
+    # Reflection is added independently, not affected by transparency
     
     final_color = (transparency_color * material.transparency) + \
                   (current_color * (1 - material.transparency)) + \
@@ -233,26 +273,25 @@ def main():
 
     # Parse the scene file
     camera, scene_settings, objects = parse_scene_file(args.scene_file)
-    #create intersectable list
+    # Create intersectable list
     intersectable = [obj for obj in objects if isinstance(obj, (Sphere, Cube, InfinitePlane))]
-    #create a lights list
+    # Create a lights list
     lights = [obj for obj in objects if isinstance(obj, Light)]
-    #create materials list
+    # Create materials list
     materials = [obj for obj in objects if isinstance(obj, Material)]
 
     # Result array
     image_array = np.zeros((args.height, args.width, 3), dtype=np.float32)
     
-    # Pre-processing
+    # Pre-processing : calculate camera vectors
     forward_vector = (camera.look_at - camera.position).normalize()
     right_vector = forward_vector.cross(camera.up_vector).normalize()
     up_vector = right_vector.cross(forward_vector).normalize()
     
     # Main rendering loop
-    # Optimization idea: Vectorize this loop later if asked, but for now simple loop
     for y in range(args.height):
         for x in range(args.width):
-            # args.width - 1 - x Flips the Left/Right axis to fix mirroring
+            # args.width - 1 - x, args.height - 1 - y Flips the image axis to match the camera's coordinate system
             ray = camera.get_ray(args.width - 1 - x, args.height - 1 - y, args.width, args.height, forward_vector, right_vector, up_vector)
             
             final_color = trace_ray(
@@ -265,7 +304,7 @@ def main():
             )
             
             # Store in image
-            image_array[y, x] = final_color.to_rgb()
+            image_array[y, x] = final_color.to_rgb() 
 
     # Save the output image
     save_image(image_array, args.output_image)

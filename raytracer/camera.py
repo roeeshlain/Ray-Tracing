@@ -2,6 +2,18 @@ from vector import Vector
 from ray import Ray
 
 class Camera:
+    """
+    Camera class - represents a camera in 3D space.
+    It is used to represent the properties of a camera in 3D space.
+    Includes camera - related calculations.
+
+    Attributes:
+        position (Vector): The position of the camera.
+        look_at (Vector): The look at point of the camera.
+        up_vector (Vector): The up vector of the camera.
+        screen_distance (float): The distance from the camera to the screen.
+        screen_width (float): The width of the screen.
+    """
     def __init__(self, position, look_at, up_vector, screen_distance, screen_width):
         self.position = Vector(*position)
         self.look_at = Vector(*look_at)
@@ -14,6 +26,21 @@ class Camera:
         self.up = self.right.cross(self.direction).normalize()
 
     def get_ray(self, pixel_x, pixel_y, image_width, image_height, forward_vector, right_vector, up_vector):
+        """
+        Get a ray from the camera to a pixel on the screen.
+
+        Args:
+            pixel_x (int): The x-coordinate of the pixel.
+            pixel_y (int): The y-coordinate of the pixel.
+            image_width (int): The width of the image.
+            image_height (int): The height of the image.
+            forward_vector (Vector): The forward vector of the camera.
+            right_vector (Vector): The right vector of the camera.
+            up_vector (Vector): The up vector of the camera.
+
+        Returns:
+            Ray: The ray from the camera to the pixel on the screen.
+        """
         aspect_ratio = image_width / image_height
         screen_height = self.screen_width / aspect_ratio
 

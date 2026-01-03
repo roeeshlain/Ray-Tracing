@@ -1,6 +1,15 @@
 from vector import Vector
 
 class Sphere:
+    """
+    Sphere class - represents a sphere in 3D space.
+    Includes a specific method for ray intersection.
+
+    Attributes:
+        position (Vector): The position of the sphere's center.
+        radius (float): The radius of the sphere.
+        material_index (int): The index of the material of the sphere.
+    """
     def __init__(self, position, radius, material_index):
         if not isinstance(position, (list, tuple)) or len(position) != 3:
             raise ValueError("Position must be a list or tuple of three numerical values")
@@ -9,8 +18,7 @@ class Sphere:
         self.material_index = material_index
         
 
-    #to implement ray interception
-    def ray_interception(self, ray):
+    def ray_interception(self, ray): #using sphere - ray intersection algebric method
         a = 1  # since ray.direction is normalized
         b = 2 * ray.direction.dot(ray.origin - self.position)
         c = (ray.origin - self.position).dot(ray.origin - self.position) - self.radius * self.radius
@@ -21,7 +29,7 @@ class Sphere:
             t1 = (-b - discriminant**0.5) / (2 * a)
             t2 = (-b + discriminant**0.5) / (2 * a)
             
-            # Logic to handle rays starting inside the sphere
+            # Handle rays starting inside the sphere
             if t1 > 0:
                 t = t1
             elif t2 > 0:
